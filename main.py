@@ -187,4 +187,16 @@ def home():
 
 # ---------------- MAIN ----------------
 if __name__ == "__main__":
+    import threading
+
+    # Run Telegram bot in background (polling mode)
+    def run_bot():
+        print("🤖 Telegram bot polling started...")
+        tg_app.run_polling()
+
+    threading.Thread(target=run_bot, daemon=True).start()
+
+    # Run Flask app to keep Render service alive
+    print("🌐 Flask server started...")
     app_flask.run(host="0.0.0.0", port=PORT)
+
