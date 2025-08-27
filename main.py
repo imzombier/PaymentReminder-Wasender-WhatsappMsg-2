@@ -8,6 +8,7 @@ from flask import Flask
 from telegram import Bot, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 import asyncio
+import threading
 
 # ---------------- CONFIG ----------------
 ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))
@@ -37,22 +38,28 @@ def to_num(x):
             return 0
         s = str(x).replace(",", "").strip()
         return float(s)
-    except:
+    except Exception as e:
+        logging.error(f"to_num error: {e}")
         return 0
 
 def clean_mobile(m):
-    s = re.sub(r"\D", "", str(m))
-    if s.startswith("91") and len(s) == 12:
-        s = s[-10:]
-    if len(s) == 10 and s[0] in "6789":
-        return s
-    return None
+    try:
+        s = re.sub(r"\D", "", str(m))
+        if s.startswith("91") and len(s) == 12:
+            s = s[-10:]
+        if len(s) == 10 and s[0] in "6789":
+            return s
+        return None
+    except Exception as e:
+        logging.error(f"clean_mobile error: {e}")
+        return None
 
 def fmt_amt(x):
     try:
         x = float(x)
         return str(int(x)) if x.is_integer() else f"{x:.2f}"
-    except:
+    except Exception as e:
+        logging.error(f"fmt_amt error: {e}")
         return "0"
 
 def build_msg(name, loan_no, advance, edi, overdue, payable, link):
@@ -68,47 +75,36 @@ def build_msg(name, loan_no, advance, edi, overdue, payable, link):
     )
 
 def send_whatsapp(mobile, message):
-    """
-    Send WhatsApp message using Wasender API
-    """
-    url = WASENDER_API_URL
-    api_key = WASENDER_API_KEY
-
-    if len(mobile) == 10:
-        mobile = "+91" + mobile
-    elif not mobile.startswith("+"):
-        mobile = "+" + mobile
-
-    payload = {
-        "to": mobile,
-        "text": message
-    }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-
     try:
-        response = requests.post(url, json=payload, headers=headers)
+        if len(mobile) == 10:
+            mobile = "+91" + mobile
+        elif not mobile.startswith("+"):
+            mobile = "+" + mobile
+
+        payload = {"to": mobile, "text": message}
+        headers = {"Authorization": f"Bearer {WASENDER_API_KEY}", "Content-Type": "application/json"}
+
+        response = requests.post(WASENDER_API_URL, json=payload, headers=headers)
         result = response.json()
         logging.info(f"WASENDER response for {mobile}: {result}")
-
         if response.status_code == 200 and result.get("success", False):
             return {"success": True}
         else:
             return {"error": result.get("message", "Unknown error")}
     except Exception as e:
-        logging.error(f"WASENDER error for {mobile}: {e}")
+        logging.error(f"WASENDER exception for {mobile}: {e}")
         return {"error": str(e)}
 
 # ---------------- BOT HANDLERS ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logging.info(f"/start called by {update.effective_user.id}")
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ You are not authorized to use this bot.")
         return
     await update.message.reply_text("✅ Welcome Admin! Please send me the Excel file (.xlsx).")
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logging.info(f"handle_file called by {update.effective_user.id}")
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ You are not authorized.")
         return
@@ -136,8 +132,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 od = to_num(row.get("over due"))
                 edi_amt = to_num(row.get("edi amount"))
                 adv_amt = to_num(row.get("advance"))
+                payable = edi_amt + od - adv_amt
 
-                payable = (edi_amt + od - adv_amt)
                 if payable <= 0:
                     skip_count += 1
                     continue
@@ -158,6 +154,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     log_lines.append(f"✅ {row.get('customer name')} | {mobile_num} | Sent")
 
             except Exception as e:
+                logging.error(f"Row error: {e}")
                 log_lines.append(f"❌ {row.get('customer name')} | {row.get('mobile no')} | Error: {e}")
                 skip_count += 1
 
@@ -166,6 +163,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await bot.send_message(chat_id=LOG_CHANNEL_ID, text="\n".join(log_lines), parse_mode="Markdown")
 
     except Exception as e:
+        logging.error(f"File processing error: {e}")
         await update.message.reply_text(f"❌ Error processing file: {e}")
 
 # ---------------- TELEGRAM APP ----------------
@@ -173,20 +171,17 @@ tg_app = ApplicationBuilder().token(BOT_TOKEN).build()
 tg_app.add_handler(CommandHandler("start", start))
 tg_app.add_handler(MessageHandler(filters.Document.FileExtension("xlsx"), handle_file))
 
-# ---------------- FLASK APP (just keep-alive) ----------------
+# ---------------- FLASK APP ----------------
 @app_flask.route("/", methods=["GET"])
 def home():
     return "Bot is running ✅"
 
 # ---------------- MAIN ----------------
+def run_bot():
+    logging.info("🤖 Telegram bot polling started...")
+    tg_app.run_polling()
+
 if __name__ == "__main__":
-    import threading
-
-    def run_bot():
-        print("🤖 Telegram bot polling started...")
-        tg_app.run_polling()
-
     threading.Thread(target=run_bot, daemon=True).start()
-
-    print("🌐 Flask server started...")
+    logging.info("🌐 Flask server started...")
     app_flask.run(host="0.0.0.0", port=PORT)
