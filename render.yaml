@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: payment-reminder-wasender
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn main:app_flask --bind 0.0.0.0:$PORT --timeout 120"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
