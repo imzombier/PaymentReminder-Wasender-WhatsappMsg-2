@@ -1,187 +1,117 @@
 import os
-import re
-import logging
 import pandas as pd
-import requests
-from pathlib import Path
-from flask import Flask
-from telegram import Bot, Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+import re
 import asyncio
-import threading
+import logging
+import requests
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
 
 # ---------------- CONFIG ----------------
-ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))
-LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", "-1001234567890"))
-PAYMENT_LINK = os.getenv("PAYMENT_LINK", "https://payments.example.com")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN not set")
-
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 WASENDER_API_URL = os.getenv("WASENDER_API_URL", "https://wasenderapi.com/api/send-message")
-WASENDER_API_KEY = os.getenv("WASENDER_API_KEY")
-
-TEMP_DIR = Path("uploads")
-TEMP_DIR.mkdir(exist_ok=True)
-
-PORT = int(os.environ.get("PORT", 5000))
+WASENDER_API_KEY = os.getenv("WASENDER_API_KEY", "YOUR_WASENDER_API_KEY")
+SAVE_PATH = "loan_data.xlsx"
+PAYMENT_LINK = os.getenv("PAYMENT_LINK", "https://veritasfin.in/paynow/")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-bot = Bot(BOT_TOKEN)
-app_flask = Flask(__name__)
-
 # ---------------- HELPERS ----------------
-def to_num(x):
+def clean_mobile(mobile):
     try:
-        if pd.isna(x):
-            return 0
-        s = str(x).replace(",", "").strip()
-        return float(s)
-    except Exception as e:
-        logging.error(f"to_num error: {e}")
-        return 0
-
-def clean_mobile(m):
-    try:
-        s = re.sub(r"\D", "", str(m))
+        s = re.sub(r"\D", "", str(mobile))
         if s.startswith("91") and len(s) == 12:
             s = s[-10:]
         if len(s) == 10 and s[0] in "6789":
             return s
         return None
-    except Exception as e:
-        logging.error(f"clean_mobile error: {e}")
+    except:
         return None
 
-def fmt_amt(x):
+def to_float(x):
     try:
-        x = float(x)
-        return str(int(x)) if x.is_integer() else f"{x:.2f}"
-    except Exception as e:
-        logging.error(f"fmt_amt error: {e}")
-        return "0"
+        if pd.isna(x):
+            return 0.0
+        return float(str(x).replace(",", "").strip())
+    except:
+        return 0.0
 
 def build_msg(name, loan_no, advance, edi, overdue, payable, link):
     return (
         f"👋 ప్రియమైన {name} గారు,\n"
-        f"మీ Veritas Finance లో ఉన్న {loan_no} లోన్ నంబరుకు పెండింగ్ అమౌంట్ వివరాలు:\n\n"
-        f"💸 అడ్వాన్స్ మొత్తం: ₹{fmt_amt(advance)}\n"
-        f"📌 ఈడీ మొత్తం: ₹{fmt_amt(edi)}\n"
-        f"🔴 ఓవర్‌డ్యూ మొత్తం: ₹{fmt_amt(overdue)}\n"
-        f"✅ చెల్లించవలసిన మొత్తం: ₹{fmt_amt(payable)}\n\n"
-        f"⚠️ దయచేసి వెంటనే చెల్లించండి, లేకపోతే పెనాల్టీలు మరియు CIBIL స్కోర్‌పై ప్రభావం పడుతుంది.\n"
-        f"🔗 చెల్లించడానికి లింక్: {link}"
+        f"Veritas Finance Limited నుండి మేము మాట్లాడుతున్నాం.\n\n"
+        f"💳 లోన్ నంబర్: {loan_no}\n"
+        f"💰 అడ్వాన్స్‌ మొత్తం = ₹{advance}\n"
+        f"📌 ఈడీ మొత్తం = ₹{edi}\n"
+        f"🔴 ఓవర్‌డ్యూ = ₹{overdue}\n"
+        f"✅ చెల్లించవలసిన మొత్తం = ₹{payable}\n\n"
+        f"దయచేసి వెంటనే చెల్లించండి.\n"
+        f"🔗 చెల్లించడానికి లింక్: {link}{loan_no}"
     )
 
-def send_whatsapp(mobile, message):
+def send_whatsapp(phone, message):
+    mobile = clean_mobile(phone)
+    if not mobile:
+        logging.warning(f"Invalid mobile: {phone}")
+        return False
+    payload = {"to": f"+91{mobile}", "text": message}
+    headers = {"Authorization": f"Bearer {WASENDER_API_KEY}", "Content-Type": "application/json"}
     try:
-        if len(mobile) == 10:
-            mobile = "+91" + mobile
-        elif not mobile.startswith("+"):
-            mobile = "+" + mobile
-
-        payload = {"to": mobile, "text": message}
-        headers = {"Authorization": f"Bearer {WASENDER_API_KEY}", "Content-Type": "application/json"}
-
-        response = requests.post(WASENDER_API_URL, json=payload, headers=headers)
-        result = response.json()
-        logging.info(f"WASENDER response for {mobile}: {result}")
-        if response.status_code == 200 and result.get("success", False):
-            return {"success": True}
-        else:
-            return {"error": result.get("message", "Unknown error")}
+        resp = requests.post(WASENDER_API_URL, json=payload, headers=headers)
+        logging.info(f"Sent to {mobile}: {resp.status_code} | {resp.text}")
+        return resp.status_code == 200
     except Exception as e:
-        logging.error(f"WASENDER exception for {mobile}: {e}")
-        return {"error": str(e)}
+        logging.error(f"Error sending to {mobile}: {e}")
+        return False
 
-# ---------------- BOT HANDLERS ----------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logging.info(f"/start called by {update.effective_user.id}")
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ You are not authorized to use this bot.")
-        return
-    await update.message.reply_text("✅ Welcome Admin! Please send me the Excel file (.xlsx).")
+# ---------------- EXCEL PROCESS ----------------
+def process_excel(file_path):
+    df = pd.read_excel(file_path, header=0)
+    # Clean column names to remove non-breaking spaces
+    df.columns = [c.replace("\xa0", " ").strip() for c in df.columns]
+    for _, row in df.iterrows():
+        loan_no = row.get("LOAN A/C NO")
+        name = row.get("CUSTOMER NAME", "Customer")
+        phone = row.get("MOBILE NO")
+        edi = to_float(row.get("EDI AMOUNT"))
+        overdue = to_float(row.get("OVER DUE"))
+        advance = to_float(row.get("ADVANCE"))
+        payable = edi + overdue - advance
 
+        if payable <= 0:
+            continue
+
+        msg = build_msg(name, loan_no, advance, edi, overdue, payable, PAYMENT_LINK)
+        send_whatsapp(phone, msg)
+        asyncio.sleep(1)
+
+# ---------------- TELEGRAM HANDLERS ----------------
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logging.info(f"handle_file called by {update.effective_user.id}")
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ You are not authorized.")
-        return
-
     document = update.message.document
-    file = await document.get_file()
-    filepath = TEMP_DIR / document.file_name
-    await file.download_to_drive(custom_path=str(filepath))
-    await update.message.reply_text("📂 File received. Processing...")
+    if document and document.file_name.endswith(('.xlsx', '.xls')):
+        file = await context.bot.get_file(document.file_id)
+        await file.download_to_drive(SAVE_PATH)
+        await update.message.reply_text("📂 ఫైల్ అందింది. సందేశాలు పంపుతున్నాం...")
+        process_excel(SAVE_PATH)
+        await update.message.reply_text("✅ అన్ని మెసేజ్లు పంపబడినవి.")
+    else:
+        await update.message.reply_text("❌ దయచేసి Excel ఫైల్ (.xlsx) పంపండి.")
 
-    try:
-        df = pd.read_excel(filepath, header=0)
-        df = df.rename(columns=lambda x: str(x).replace("\xa0", " ").strip().lower())
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [[
+        InlineKeyboardButton("📂 Excel ఫైల్ పంపండి", callback_data="upload"),
+        InlineKeyboardButton("ℹ️ బోట్ గురించి", callback_data="about")
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "నేను మీ WhatsApp రిమైండర్ బోట్ ని. క్రింద ఎంపికలతో కొనసాగించండి:",
+        reply_markup=reply_markup
+    )
 
-        sent_count, skip_count = 0, 0
-        log_lines = ["📊 *WhatsApp Sending Report*"]
-
-        for _, row in df.iterrows():
-            try:
-                mobile_num = clean_mobile(row.get("mobile no"))
-                if not mobile_num:
-                    skip_count += 1
-                    continue
-
-                od = to_num(row.get("over due"))
-                edi_amt = to_num(row.get("edi amount"))
-                adv_amt = to_num(row.get("advance"))
-                payable = edi_amt + od - adv_amt
-
-                if payable <= 0:
-                    skip_count += 1
-                    continue
-
-                msg = build_msg(
-                    row.get("customer name") or "Customer",
-                    row.get("loan a/c no") or "—",
-                    adv_amt, edi_amt, od, payable,
-                    PAYMENT_LINK
-                )
-                resp = send_whatsapp(mobile_num, msg)
-
-                if "error" in resp:
-                    log_lines.append(f"❌ {row.get('customer name')} | {mobile_num} | Error: {resp['error']}")
-                    skip_count += 1
-                else:
-                    sent_count += 1
-                    log_lines.append(f"✅ {row.get('customer name')} | {mobile_num} | Sent")
-
-            except Exception as e:
-                logging.error(f"Row error: {e}")
-                log_lines.append(f"❌ {row.get('customer name')} | {row.get('mobile no')} | Error: {e}")
-                skip_count += 1
-
-        summary = f"✅ Finished sending.\n📩 Sent: {sent_count}\n⏭️ Skipped: {skip_count}"
-        await update.message.reply_text(summary)
-        await bot.send_message(chat_id=LOG_CHANNEL_ID, text="\n".join(log_lines), parse_mode="Markdown")
-
-    except Exception as e:
-        logging.error(f"File processing error: {e}")
-        await update.message.reply_text(f"❌ Error processing file: {e}")
-
-# ---------------- TELEGRAM APP ----------------
-tg_app = ApplicationBuilder().token(BOT_TOKEN).build()
-tg_app.add_handler(CommandHandler("start", start))
-tg_app.add_handler(MessageHandler(filters.Document.FileExtension("xlsx"), handle_file))
-
-# ---------------- FLASK APP ----------------
-@app_flask.route("/", methods=["GET"])
-def home():
-    return "Bot is running ✅"
-
-# ---------------- MAIN ----------------
-def run_bot():
-    logging.info("🤖 Telegram bot polling started...")
-    tg_app.run_polling()
-
+# ---------------- RUN BOT ----------------
 if __name__ == "__main__":
-    threading.Thread(target=run_bot, daemon=True).start()
-    logging.info("🌐 Flask server started...")
-    app_flask.run(host="0.0.0.0", port=PORT)
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+    logging.info("🤖 Telegram WhatsApp Bot Running...")
+    app.run_polling()
