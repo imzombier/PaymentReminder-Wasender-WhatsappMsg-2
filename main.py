@@ -4,7 +4,7 @@ import logging
 import pandas as pd
 import requests
 from pathlib import Path
-from flask import Flask, request
+from flask import Flask
 from telegram import Bot, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 import asyncio
@@ -74,7 +74,6 @@ def send_whatsapp(mobile, message):
     url = WASENDER_API_URL
     api_key = WASENDER_API_KEY
 
-    # Add +91 for India if only 10 digits
     if len(mobile) == 10:
         mobile = "+91" + mobile
     elif not mobile.startswith("+"):
@@ -127,7 +126,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sent_count, skip_count = 0, 0
         log_lines = ["📊 *WhatsApp Sending Report*"]
 
-        for i, row in df.iterrows():
+        for _, row in df.iterrows():
             try:
                 mobile_num = clean_mobile(row.get("mobile no"))
                 if not mobile_num:
@@ -174,13 +173,7 @@ tg_app = ApplicationBuilder().token(BOT_TOKEN).build()
 tg_app.add_handler(CommandHandler("start", start))
 tg_app.add_handler(MessageHandler(filters.Document.FileExtension("xlsx"), handle_file))
 
-# ---------------- FLASK WEBHOOK ----------------
-@app_flask.route(f"/{BOT_TOKEN}", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    asyncio.run(tg_app.process_update(update))
-    return "OK"
-
+# ---------------- FLASK APP (just keep-alive) ----------------
 @app_flask.route("/", methods=["GET"])
 def home():
     return "Bot is running ✅"
@@ -189,14 +182,11 @@ def home():
 if __name__ == "__main__":
     import threading
 
-    # Run Telegram bot in background (polling mode)
     def run_bot():
         print("🤖 Telegram bot polling started...")
         tg_app.run_polling()
 
     threading.Thread(target=run_bot, daemon=True).start()
 
-    # Run Flask app to keep Render service alive
     print("🌐 Flask server started...")
     app_flask.run(host="0.0.0.0", port=PORT)
-
