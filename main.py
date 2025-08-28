@@ -4,13 +4,15 @@ import re
 import asyncio
 import logging
 import requests
+import threading
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
 
 # ---------------- CONFIG ----------------
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WASENDER_API_URL = os.getenv("WASENDER_API_URL", "https://wasenderapi.com/api/send-message")
-WASENDER_API_KEY = os.getenv("WASENDER_API_KEY", "YOUR_WASENDER_API_KEY")
+WASENDER_API_KEY = os.getenv("WASENDER_API_KEY")
 SAVE_PATH = "loan_data.xlsx"
 PAYMENT_LINK = os.getenv("PAYMENT_LINK", "https://veritasfin.in/paynow/")
 
@@ -64,10 +66,8 @@ def send_whatsapp(phone, message):
         logging.error(f"Error sending to {mobile}: {e}")
         return False
 
-# ---------------- EXCEL PROCESS ----------------
 def process_excel(file_path):
     df = pd.read_excel(file_path, header=0)
-    # Clean column names to remove non-breaking spaces
     df.columns = [c.replace("\xa0", " ").strip() for c in df.columns]
     for _, row in df.iterrows():
         loan_no = row.get("LOAN A/C NO")
@@ -77,10 +77,8 @@ def process_excel(file_path):
         overdue = to_float(row.get("OVER DUE"))
         advance = to_float(row.get("ADVANCE"))
         payable = edi + overdue - advance
-
         if payable <= 0:
             continue
-
         msg = build_msg(name, loan_no, advance, edi, overdue, payable, PAYMENT_LINK)
         send_whatsapp(phone, msg)
         asyncio.sleep(1)
@@ -108,10 +106,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup
     )
 
-# ---------------- RUN BOT ----------------
-if __name__ == "__main__":
+# ---------------- RUN TELEGRAM BOT IN BACKGROUND ----------------
+def run_bot():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-    logging.info("🤖 Telegram WhatsApp Bot Running...")
+    logging.info("🤖 Telegram WhatsApp Bot Running in Polling Mode...")
     app.run_polling()
+
+# Start the bot in a separate thread
+threading.Thread(target=run_bot).start()
+
+# ---------------- FLASK APP FOR RENDERS ----------------
+app_flask = Flask(__name__)
+
+@app_flask.route("/")
+def index():
+    return "Bot is running!", 200
